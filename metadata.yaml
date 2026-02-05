@@ -1,7 +1,7 @@
 name: astrbot_plugin_today_wife
 display_name: 今日老婆 (两两配对版)
 description: 凌晨4点重置，支持两两配对及头像展示，不干扰大模型。
-author: YourName
+author: xiaolongxia521
 version: 1.1.0
 repo: https://github.com/xiaolongxia521/astrbot_plugin_today_wife
 config_schema:
