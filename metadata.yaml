@@ -1,9 +1,10 @@
 name: astrbot_plugin_today_wife
-display_name: 今日老婆 (两两配对版)
+display_name: 今日老婆 (分群配对版)
+description: 支持分群固定配对，可设置当老婆不在群时的提示文本
 description: 凌晨4点重置，支持两两配对及头像展示，不干扰大模型。
 author: YourName
-version: 1.1.0
-
+version: 2.1.0
+repo: https://github.com/xiaolongxia521/astrbot_plugin_today_wife
 config_schema:
   items:
     reset_hour:
@@ -14,3 +15,27 @@ config_schema:
       type: int
       description: 开启抽取所需的最小发言人数
       default: 2
+    enable_random_pairing:
+      type: bool
+      description: 是否启用随机配对
+      default: true
+    not_in_group_text:
+      type: string
+      description: 当固定配对的老婆不在群里时的默认提示文本
+      default: "你绑定的老婆今天不在这个群里哦~"
+    fixed_pairings:
+      type: string
+      description: |
+        分群固定配对配置（每行一个配对）
+        格式: 群号|用户QQ|老婆QQ|提示文本(可选)
+        
+        示例:
+        123456789|111111111|222222222
+        987654321|333333333|444444444|你的老婆今天没来这个群
+        
+        说明:
+        - 群号：QQ群号
+        - 用户QQ：触发指令的用户QQ
+        - 老婆QQ：绑定的老婆QQ
+        - 提示文本：可选，当老婆不在该群时显示的自定义文本
+      default: ""
