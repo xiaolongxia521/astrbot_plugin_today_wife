@@ -11,35 +11,25 @@ from astrbot.api import logger
 import astrbot.api.message_components as Comp
 
 
-@register("群老婆", "author", "支持分群固定配对和随机配对的双模式今日老婆插件", "2.1.0", "repo url")
+@register("群老婆", "xiaolongxia521", "支持分群固定配对，可设置当老婆不在群时的提示文本，凌晨4点重置，支持强娶、离婚功能，允许拥有多个群老婆。新增活跃天数配置，优化永恒老婆功能。", "3.0.0", "https://github.com/xiaolongxia521/astrbot_plugin_today_wife")
 class MyPlugin(Star):
     def __init__(self, context: Context, config: Optional[Dict] = None): 
         super().__init__(context)
         
-        # 重要：必须接收 config 参数
         self.plugin_config = config or {}
         
-        # 如果配置为空，尝试从文件读取
         if not self.plugin_config:
             self.plugin_config = self._load_config_from_file()
         
-        # 调试信息
-        logger.info(f"插件配置键: {list(self.plugin_config.keys())}")
-        logger.info(f"fixed_pairings 值: {repr(self.plugin_config.get('fixed_pairings', ''))}")
-        
-        # 核心数据结构
-        self.active_users: Dict[str, Set[str]] = {}
-        self.daily_marriages: Dict[str, Dict[str, str]] = {}
-        # 固定配对改为按群存储: {群号: {用户QQ: 老婆QQ}}
-        self.fixed_pairings: Dict[str, Dict[str, str]] = {}
+        self.active_users: Dict[str, Dict[str, Set[str]]] = defaultdict(lambda: defaultdict(set))
+        self.daily_marriages: Dict[str, Dict[str, List[str]]] = defaultdict(dict)
+        self.fixed_pairings: Dict[str, Dict[str, Dict]] = {}
         self.locks = defaultdict(asyncio.Lock)
         
-        # 从配置加载固定配对
         self._load_fixed_pairings()
         
-        # 定时任务
-        self.scheduler = AsyncIOScheduler()
         reset_hour = self.plugin_config.get("reset_hour", 4)
+        self.scheduler = AsyncIOScheduler()
         self.scheduler.add_job(self.reset_daily_data, 'cron', hour=reset_hour, minute=0)
         self.scheduler.start()
         
@@ -47,8 +37,6 @@ class MyPlugin(Star):
         logger.info(f"今日老婆插件已启动，每天 {reset_hour}:00 重置数据。固定配对数: {fixed_count}")
 
     def _load_config_from_file(self) -> Dict:
-        """直接从配置文件读取"""
-        # 先尝试直接读取已知路径
         known_path = "/AstrBot/data/config/astrbot_plugin_today_wife_config.json"
         
         if os.path.exists(known_path):
@@ -59,9 +47,8 @@ class MyPlugin(Star):
                     return config
             except Exception as e:
                 logger.error(f"读取配置文件失败: {e}")
-                return {"reset_hour": 4, "fixed_pairings": "", "enable_random_pairing": True, "not_in_group_text": "你绑定的老婆今天不在这个群里哦~"}
+                return self._get_default_config()
         
-        # 如果已知路径不存在，尝试其他可能路径
         config_paths = [
             "/AstrBot/data/config/群老婆_config.json",
             os.path.join(os.path.dirname(__file__), "config.json"),
@@ -78,19 +65,23 @@ class MyPlugin(Star):
                     logger.error(f"读取备用配置文件失败: {e}")
         
         logger.warning("未找到插件配置文件，使用默认配置")
-        return {"reset_hour": 4, "fixed_pairings": "", "enable_random_pairing": True, "not_in_group_text": "你绑定的老婆今天不在这个群里哦~"}
+        return self._get_default_config()
+
+    def _get_default_config(self):
+        return {
+            "reset_hour": 4,
+            "active_days": 1,
+            "fixed_pairings": "{}",
+            "enable_random_pairing": True,
+            "not_in_group_text": "你绑定的老婆今天不在这个群里哦~",
+            "max_random_count": 5,
+            "max_marry_count": 3,
+            "max_divorce_count": 2
+        }
 
     def _load_fixed_pairings(self):
-        """从配置文件加载固定配对（支持分群配置）
-        
-        配置格式（每行一个配对）：
-        群号|用户QQ|老婆QQ|提示文本(可选)
-        
-        示例：
-        123456|111111|222222
-        789012|333333|444444|你的老婆不在这个群哦
-        """
-        fixed_config = self.plugin_config.get("fixed_pairings", "").strip()
+        """从配置文件加载固定配对（支持 text 类型的 JSON 字符串）"""
+        fixed_config = self.plugin_config.get("fixed_pairings", "{}").strip()
         
         logger.info(f"处理 fixed_pairings: {repr(fixed_config)}")
         
@@ -98,92 +89,95 @@ class MyPlugin(Star):
             logger.info("未配置固定配对，将使用随机配对模式")
             return
         
-        # 解析配置行
-        lines = fixed_config.split('\n')
-        for line in lines:
-            line = line.strip()
-            if not line or line.startswith('#'):
-                continue
+        try:
+            if isinstance(fixed_config, str):
+                parsed_config = json.loads(fixed_config)
+            else:
+                parsed_config = fixed_config
+                
+            if isinstance(parsed_config, dict):
+                for group_id, user_wife_map in parsed_config.items():
+                    if not isinstance(user_wife_map, dict):
+                        continue
+                    
+                    if group_id not in self.fixed_pairings:
+                        self.fixed_pairings[group_id] = {}
+                    
+                    for user_qq, wife_qq in user_wife_map.items():
+                        self.fixed_pairings[group_id][user_qq] = {
+                            "wife": wife_qq,
+                            "text": None
+                        }
+                        logger.info(f"加载固定配对: 群{group_id} - {user_qq} <-> {wife_qq}")
             
-            parts = line.split('|')
-            if len(parts) < 3:
-                logger.warning(f"配置格式错误，跳过: {line}")
-                continue
+            total = sum(len(p) for p in self.fixed_pairings.values())
+            logger.info(f"成功加载 {len(self.fixed_pairings)} 个群的 {total} 对固定配对")
             
-            group_id = parts[0].strip()
-            user_qq = parts[1].strip()
-            wife_qq = parts[2].strip()
-            # 可选的提示文本（当老婆不在群里时显示）
-            not_in_group_text = parts[3].strip() if len(parts) > 3 else None
-            
-            if not group_id or not user_qq or not wife_qq:
-                continue
-            
-            # 初始化该群的配对字典
-            if group_id not in self.fixed_pairings:
-                self.fixed_pairings[group_id] = {}
-            
-            # 存储配对信息
-            self.fixed_pairings[group_id][user_qq] = {
-                "wife": wife_qq,
-                "text": not_in_group_text
-            }
-            logger.info(f"加载固定配对: 群{group_id} - {user_qq} <-> {wife_qq}")
-        
-        total = sum(len(p) for p in self.fixed_pairings.values())
-        logger.info(f"成功加载 {len(self.fixed_pairings)} 个群的 {total} 对固定配对")
+        except Exception as e:
+            logger.error(f"解析固定配对配置失败: {e}")
+            logger.warning("将使用随机配对模式")
 
     def get_fixed_pairing(self, group_id: str, user_id: str) -> Optional[Dict]:
-        """获取用户的固定配对（如果有）
-        
-        返回: {"wife": 老婆QQ, "text": 不在群时的提示文本} 或 None
-        """
+        """获取用户的固定配对"""
         if group_id in self.fixed_pairings:
             return self.fixed_pairings[group_id].get(user_id)
         return None
 
     async def reset_daily_data(self):
-        """每日重置：清除非固定配对的每日数据"""
-        self.active_users.clear()
+        """每日重置"""
+        import datetime
+        today_str = datetime.datetime.now().strftime("%Y-%m-%d")
         
-        # 只清除非固定配对的每日婚姻
+        for group_id in list(self.active_users.keys()):
+            days_to_keep = self.plugin_config.get("active_days", 1)
+            current_day = datetime.datetime.now()
+            kept_days = []
+            
+            for day_str in list(self.active_users[group_id].keys()):
+                day = datetime.datetime.strptime(day_str, "%Y-%m-%d")
+                days_diff = (current_day - day).days
+                if days_diff < days_to_keep:
+                    kept_days.append(day_str)
+                else:
+                    del self.active_users[group_id][day_str]
+        
         for group_id in list(self.daily_marriages.keys()):
             self.daily_marriages[group_id].clear()
             
-            # 如果有固定配对，重新应用
             if group_id in self.fixed_pairings:
                 for user_id, info in self.fixed_pairings[group_id].items():
                     wife_id = info["wife"]
-                    self.daily_marriages[group_id][user_id] = wife_id
+                    self.daily_marriages[group_id][user_id] = [wife_id]
+                    if wife_id not in self.daily_marriages[group_id]:
+                        self.daily_marriages[group_id][wife_id] = []
+                    if user_id not in self.daily_marriages[group_id][wife_id]:
+                        self.daily_marriages[group_id][wife_id].append(user_id)
         
-        logger.info("每日发言记录已清空，固定配对已保留。")
+        logger.info("每日发言记录已重置，固定配对已保留。")
 
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def handle_all_messages(self, event: AstrMessageEvent):
-        """记录发言用户（仅用于随机配对模式）"""
+        """记录发言用户"""
         if not event.message_str or event.message_str.startswith("/"):
             return
 
+        import datetime
         group_id = event.get_group_id()
         user_id = event.get_sender_id()
+        today_str = datetime.datetime.now().strftime("%Y-%m-%d")
+        
         if not group_id: 
             return
 
-        # 如果有固定配对，跳过发言记录
         if self.get_fixed_pairing(group_id, user_id):
             return
 
         async with self.locks[group_id]:
-            if group_id not in self.active_users:
-                self.active_users[group_id] = set()
-
-            if user_id not in self.active_users[group_id]:
-                self.active_users[group_id].add(user_id)
+            self.active_users[group_id][today_str].add(user_id)
 
     async def _get_group_members(self, event: AstrMessageEvent, group_id: str) -> Set[str]:
         """获取群成员列表"""
         try:
-            # 使用 AstrBot 的 API 获取群成员
             group = await event.get_group(group_id)
             if group and group.members:
                 return set(str(m.user_id) for m in group.members)
@@ -192,9 +186,68 @@ class MyPlugin(Star):
             logger.warning(f"获取群成员失败: {e}")
             return set()
 
+    async def _get_group_member_nickname(self, event: AstrMessageEvent, user_qq: str) -> str:
+        """根据QQ号获取群昵称"""
+        try:
+            group = await event.get_group(event.get_group_id())
+            if group and group.members:
+                for member in group.members:
+                    if str(member.user_id) == user_qq:
+                        return member.nickname or user_qq
+            return user_qq
+        except Exception as e:
+            logger.warning(f"获取用户昵称失败: {e}")
+            return user_qq
+
+    async def _parse_target_qq(self, event: AstrMessageEvent) -> Optional[str]:
+        """解析目标QQ号"""
+        # 1. 尝试从事件参数中解析
+        message_str = event.message_str.strip()
+        if message_str:
+            # 检查是否是QQ号
+            if message_str.isdigit() and len(message_str) >= 5 and len(message_str) <= 12:
+                return message_str
+                
+            # 检查是否包含QQ号
+            import re
+            qq_match = re.search(r'(\d{5,12})', message_str)
+            if qq_match:
+                return qq_match.group(1)
+        
+        # 2. 尝试从消息链中解析@成员
+        if hasattr(event, 'message_obj') and hasattr(event.message_obj, 'chain'):
+            for component in event.message_obj.chain:
+                if hasattr(component, 'qq'):
+                    return str(component.qq)
+                elif hasattr(component, 'data') and 'qq' in component.data:
+                    return str(component.data['qq'])
+        
+        return None
+
+    async def _get_active_candidates(self, group_id: str, user_id: str) -> List[str]:
+        """获取活跃用户候选人"""
+        import datetime
+        
+        candidates = set()
+        days_to_keep = self.plugin_config.get("active_days", 1)
+        current_day = datetime.datetime.now()
+        
+        for day_str in list(self.active_users[group_id].keys()):
+            day = datetime.datetime.strptime(day_str, "%Y-%m-%d")
+            days_diff = (current_day - day).days
+            if days_diff < days_to_keep:
+                candidates.update(self.active_users[group_id][day_str])
+        
+        # 移除已经是老婆的用户，避免重复
+        if group_id in self.daily_marriages and user_id in self.daily_marriages[group_id]:
+            existing_wives = self.daily_marriages[group_id][user_id]
+            candidates = [uid for uid in candidates if uid != user_id and uid not in existing_wives]
+        
+        return candidates
+
     @filter.command("今日老婆")
-    async def marry_me(self, event: AstrMessageEvent):
-        """核心指令：优先使用固定配对，否则使用随机配对"""
+    async def show_wives(self, event: AstrMessageEvent):
+        """显示所有老婆关系"""
         group_id = event.get_group_id()
         user_id = event.get_sender_id()
         
@@ -203,22 +256,38 @@ class MyPlugin(Star):
             return
 
         async with self.locks[group_id]:
-            # 初始化数据结构
+            if group_id not in self.daily_marriages or user_id not in self.daily_marriages[group_id]:
+                yield event.plain_result("你还没有群老婆哦~")
+                return
+            
+            yield await self.build_marriage_result(event, user_id, self.daily_marriages[group_id][user_id])
+
+    @filter.command("随机老婆")
+    async def marry_me(self, event: AstrMessageEvent):
+        """随机配对功能：优先使用固定配对，否则使用随机配对"""
+        group_id = event.get_group_id()
+        user_id = event.get_sender_id()
+        
+        if not group_id:
+            yield event.plain_result("此功能仅限群聊使用。")
+            return
+
+        async with self.locks[group_id]:
             if group_id not in self.daily_marriages:
                 self.daily_marriages[group_id] = {}
             
-            # 首先检查固定配对
+            if user_id not in self.daily_marriages[group_id]:
+                self.daily_marriages[group_id][user_id] = []
+            
             fixed_info = self.get_fixed_pairing(group_id, user_id)
             if fixed_info:
                 fixed_wife = fixed_info["wife"]
                 not_in_group_text = fixed_info.get("text")
                 
-                # 获取当前群成员，检查老婆是否在群里
                 group_members = await self._get_group_members(event, group_id)
                 wife_in_group = fixed_wife in group_members if group_members else False
                 
                 if not wife_in_group:
-                    # 老婆不在群里，显示自定义文本或默认文本
                     if not_in_group_text:
                         yield event.plain_result(not_in_group_text)
                     else:
@@ -226,77 +295,200 @@ class MyPlugin(Star):
                         yield event.plain_result(default_text)
                     return
                 
-                # 老婆在群里，正常显示
-                # 确保固定配对已经注册到每日婚姻中
-                if user_id not in self.daily_marriages[group_id]:
-                    self.daily_marriages[group_id][user_id] = fixed_wife
+                if fixed_wife not in self.daily_marriages[group_id][user_id]:
+                    self.daily_marriages[group_id][user_id].append(fixed_wife)
                 
-                yield self.build_marriage_result(event, user_id, fixed_wife, is_fixed=True, wife_in_group=True)
+                if fixed_wife not in self.daily_marriages[group_id]:
+                    self.daily_marriages[group_id][fixed_wife] = []
+                if user_id not in self.daily_marriages[group_id][fixed_wife]:
+                    self.daily_marriages[group_id][fixed_wife].append(user_id)
+                
+                yield await self.build_random_result(event, user_id, self.daily_marriages[group_id][user_id])
                 return
             
-            # 如果没有固定配对，检查是否已经有每日老婆
-            married_dict = self.daily_marriages[group_id]
-            if user_id in married_dict:
-                wife_id = married_dict[user_id]
-                yield self.build_marriage_result(event, user_id, wife_id, is_new=False, wife_in_group=True)
-                return
-            
-            # 检查是否启用随机配对
             enable_random = self.plugin_config.get("enable_random_pairing", True)
             if not enable_random:
                 yield event.plain_result("随机配对功能已关闭，且你未在固定配对列表中。")
                 return
             
-            # 确保用户记录在活跃列表中
-            if group_id not in self.active_users:
-                self.active_users[group_id] = set()
-            self.active_users[group_id].add(user_id)
+            active_members = await self._get_active_candidates(group_id, user_id)
             
-            # 准备随机候选人
-            active_members = self.active_users[group_id]
-            married_people = set(married_dict.keys())
-            candidates = [
-                uid for uid in active_members 
-                if uid not in married_people and uid != user_id
-            ]
-
-            if not candidates:
-                yield event.plain_result("没有落单的群友了，大家都已经结为连理了...")
+            if not active_members:
+                yield event.plain_result("没有活跃的群友可以配对...")
                 return
 
-            selected_wife = random.choice(candidates)
-            married_dict[user_id] = selected_wife
-            married_dict[selected_wife] = user_id
+            selected_wife = random.choice(active_members)
+            self.daily_marriages[group_id][user_id].append(selected_wife)
+            
+            if selected_wife not in self.daily_marriages[group_id]:
+                self.daily_marriages[group_id][selected_wife] = []
+            if user_id not in self.daily_marriages[group_id][selected_wife]:
+                self.daily_marriages[group_id][selected_wife].append(user_id)
             
             logger.info(f"群 {group_id} 随机配对成功: {user_id} & {selected_wife}")
-            yield self.build_marriage_result(event, user_id, selected_wife, is_new=True, wife_in_group=True)
+            yield await self.build_random_result(event, user_id, self.daily_marriages[group_id][user_id])
 
-    def build_marriage_result(self, event, user_id, wife_id, is_new=True, is_fixed=False, wife_in_group=True):
-        """构建结果消息链
+    @filter.command("强娶")
+    async def force_marry(self, event: AstrMessageEvent):
+        """强娶功能：强制绑定指定用户"""
+        group_id = event.get_group_id()
+        user_id = event.get_sender_id()
         
-        Args:
-            wife_in_group: 老婆是否在群里（不在时不能@，否则会报错）
-        """
-        avatar_url = f"https://q.qlogo.cn/headimg_dl?dst_uin={wife_id}&spec=640"
+        if not group_id:
+            yield event.plain_result("此功能仅限群聊使用。")
+            return
         
-        if is_fixed:
-            msg_text = " 💝 命中注定！你的永恒老婆是："
-        elif is_new:
-            msg_text = " ✨ 恭喜！你今天的命定老婆是："
-        else:
-            msg_text = " ❤️ 别贪心，你今天的法定老婆依然是："
+        target_qq = await self._parse_target_qq(event)
         
-        chain = [Comp.At(qq=user_id), Comp.Plain(msg_text)]
+        if not target_qq:
+            yield event.plain_result("未能识别到有效的QQ号。请使用 @成员 或输入 QQ号。")
+            return
         
-        # 只有在群里才 @ 老婆，否则只显示 QQ 号
-        if wife_in_group:
-            chain.append(Comp.At(qq=wife_id))
-        else:
-            chain.append(Comp.Plain(f" {wife_id}"))
+        if target_qq == user_id:
+            yield event.plain_result("你不能强娶自己哦~")
+            return
         
-        chain.append(Comp.Plain("\n"))
-        chain.append(Comp.Image.fromURL(avatar_url))
+        async with self.locks[group_id]:
+            if group_id not in self.daily_marriages:
+                self.daily_marriages[group_id] = {}
+            
+            if user_id not in self.daily_marriages[group_id]:
+                self.daily_marriages[group_id][user_id] = []
+            
+            if target_qq not in self.daily_marriages[group_id]:
+                self.daily_marriages[group_id][target_qq] = []
+            
+            if target_qq not in self.daily_marriages[group_id][user_id]:
+                self.daily_marriages[group_id][user_id].append(target_qq)
+            
+            if user_id not in self.daily_marriages[group_id][target_qq]:
+                self.daily_marriages[group_id][target_qq].append(user_id)
+            
+            logger.info(f"群 {group_id} 强娶成功: {user_id} & {target_qq}")
+            yield await self.build_marry_result(event, user_id, self.daily_marriages[group_id][user_id])
+
+    @filter.command("离婚")
+    async def divorce(self, event: AstrMessageEvent):
+        """离婚功能：解除与指定老婆的关系"""
+        group_id = event.get_group_id()
+        user_id = event.get_sender_id()
         
+        if not group_id:
+            yield event.plain_result("此功能仅限群聊使用。")
+            return
+        
+        target_qq = await self._parse_target_qq(event)
+        
+        if not target_qq:
+            yield event.plain_result("未能识别到有效的QQ号。请使用 @成员 或输入 QQ号。")
+            return
+        
+        async with self.locks[group_id]:
+            if group_id not in self.daily_marriages or user_id not in self.daily_marriages[group_id]:
+                yield event.plain_result("你还没有群老婆，无需离婚。")
+                return
+            
+            if target_qq not in self.daily_marriages[group_id][user_id]:
+                yield event.plain_result("你和这个人没有婚姻关系。")
+                return
+            
+            self.daily_marriages[group_id][user_id].remove(target_qq)
+            if not self.daily_marriages[group_id][user_id]:
+                del self.daily_marriages[group_id][user_id]
+            
+            if target_qq in self.daily_marriages[group_id]:
+                if user_id in self.daily_marriages[group_id][target_qq]:
+                    self.daily_marriages[group_id][target_qq].remove(user_id)
+                    if not self.daily_marriages[group_id][target_qq]:
+                        del self.daily_marriages[group_id][target_qq]
+            
+            logger.info(f"群 {group_id} 离婚成功: {user_id} & {target_qq}")
+            yield await self.build_divorce_result(event, user_id, self.daily_marriages.get(group_id, {}).get(user_id, []))
+
+    async def build_marriage_result(self, event, user_id, wife_list):
+        """构建结果消息链"""
+        chain = [Comp.At(qq=user_id), Comp.Plain(" 你的群老婆有：")]
+        
+        for index, wife_id in enumerate(wife_list):
+            if index > 0:
+                chain.append(Comp.Plain("、"))
+            
+            # 获取群昵称
+            nickname = await self._get_group_member_nickname(event, wife_id)
+            chain.append(Comp.Plain(nickname))
+        
+        if len(wife_list) <= 2:
+            for wife_id in wife_list:
+                avatar_url = f"https://q.qlogo.cn/headimg_dl?dst_uin={wife_id}&spec=640"
+                chain.append(Comp.Plain("\n"))
+                chain.append(Comp.Image.fromURL(avatar_url))
+        
+        return event.chain_result(chain)
+
+    async def build_random_result(self, event, user_id, wife_list):
+        """构建随机老婆结果消息链"""
+        chain = [Comp.At(qq=user_id), Comp.Plain(" 今天的随机老婆是：")]
+        
+        for index, wife_id in enumerate(wife_list):
+            if index > 0:
+                chain.append(Comp.Plain("、"))
+            
+            # 获取群昵称
+            nickname = await self._get_group_member_nickname(event, wife_id)
+            chain.append(Comp.Plain(nickname))
+        
+        if len(wife_list) <= 2:
+            for wife_id in wife_list:
+                avatar_url = f"https://q.qlogo.cn/headimg_dl?dst_uin={wife_id}&spec=640"
+                chain.append(Comp.Plain("\n"))
+                chain.append(Comp.Image.fromURL(avatar_url))
+        
+        chain.append(Comp.Plain(" 喵~"))
+        return event.chain_result(chain)
+
+    async def build_marry_result(self, event, user_id, wife_list):
+        """构建强娶结果消息链"""
+        chain = [Comp.At(qq=user_id), Comp.Plain(" 强娶成功！现在你的群老婆有：")]
+        
+        for index, wife_id in enumerate(wife_list):
+            if index > 0:
+                chain.append(Comp.Plain("、"))
+            
+            # 获取群昵称
+            nickname = await self._get_group_member_nickname(event, wife_id)
+            chain.append(Comp.Plain(nickname))
+        
+        if len(wife_list) <= 2:
+            for wife_id in wife_list:
+                avatar_url = f"https://q.qlogo.cn/headimg_dl?dst_uin={wife_id}&spec=640"
+                chain.append(Comp.Plain("\n"))
+                chain.append(Comp.Image.fromURL(avatar_url))
+        
+        chain.append(Comp.Plain(" 喵~"))
+        return event.chain_result(chain)
+
+    async def build_divorce_result(self, event, user_id, wife_list):
+        """构建离婚结果消息链"""
+        if not wife_list:
+            return event.plain_result(f"{Comp.At(qq=user_id)} 离婚成功！你现在没有群老婆了~ 喵~")
+        
+        chain = [Comp.At(qq=user_id), Comp.Plain(" 离婚成功！现在你的群老婆有：")]
+        
+        for index, wife_id in enumerate(wife_list):
+            if index > 0:
+                chain.append(Comp.Plain("、"))
+            
+            # 获取群昵称
+            nickname = await self._get_group_member_nickname(event, wife_id)
+            chain.append(Comp.Plain(nickname))
+        
+        if len(wife_list) <= 2:
+            for wife_id in wife_list:
+                avatar_url = f"https://q.qlogo.cn/headimg_dl?dst_uin={wife_id}&spec=640"
+                chain.append(Comp.Plain("\n"))
+                chain.append(Comp.Image.fromURL(avatar_url))
+        
+        chain.append(Comp.Plain(" 喵~"))
         return event.chain_result(chain)
 
     async def terminate(self):

@@ -1,9 +1,8 @@
 name: astrbot_plugin_today_wife
 display_name: 今日老婆 (分群配对版)
-description: 支持分群固定配对，可设置当老婆不在群时的提示文本
-description: 凌晨4点重置，支持两两配对及头像展示，不干扰大模型。
-author: YourName
-version: 2.1.0
+description: 支持分群固定配对，可设置当老婆不在群时的提示文本，凌晨4点重置，支持强娶、离婚功能，允许拥有多个群老婆。新增活跃天数配置，优化永恒老婆功能。
+author: xiaolongxia521
+version: 3.0.0
 repo: https://github.com/xiaolongxia521/astrbot_plugin_today_wife
 config_schema:
   items:
@@ -11,31 +10,40 @@ config_schema:
       type: int
       description: 每天重置的时间（小时）
       default: 4
-    min_members_to_start:
+    active_days:
       type: int
-      description: 开启抽取所需的最小发言人数
-      default: 2
-    enable_random_pairing:
-      type: bool
-      description: 是否启用随机配对
-      default: true
+      description: 发言活跃天数（用于随机老婆功能）
+      hint: 填写 1 表示今日发言过即可，2 表示今日或昨日发言过，以此类推
+      default: 1
+    fixed_pairings:
+      type: text
+      description: 分群固定配对配置
+      hint: |
+        配置格式：
+        {"123456789": {"111111111": "222222222", "333333333": "444444444"}}
+        
+        说明：
+        - 键为群号，值为该群的用户-老婆配对
+        - 支持一个群有多个固定配对
+        - 格式必须是有效的 JSON
+      default: "{}"
     not_in_group_text:
       type: string
       description: 当固定配对的老婆不在群里时的默认提示文本
       default: "你绑定的老婆今天不在这个群里哦~"
-    fixed_pairings:
-      type: string
-      description: |
-        分群固定配对配置（每行一个配对）
-        格式: 群号|用户QQ|老婆QQ|提示文本(可选)
-        
-        示例:
-        123456789|111111111|222222222
-        987654321|333333333|444444444|你的老婆今天没来这个群
-        
-        说明:
-        - 群号：QQ群号
-        - 用户QQ：触发指令的用户QQ
-        - 老婆QQ：绑定的老婆QQ
-        - 提示文本：可选，当老婆不在该群时显示的自定义文本
-      default: ""
+    enable_random_pairing:
+      type: bool
+      description: 是否启用随机配对
+      default: true
+    max_random_count:
+      type: int
+      description: 每日随机抽取群老婆的次数限制
+      default: 5
+    max_marry_count:
+      type: int
+      description: 每日强娶群老婆的次数限制
+      default: 3
+    max_divorce_count:
+      type: int
+      description: 每日离婚的次数限制
+      default: 2
