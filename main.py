@@ -2,6 +2,8 @@ import asyncio
 import random
 import json
 import os
+import sys
+import importlib
 from collections import defaultdict
 from typing import Set, Dict, List, Optional
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -10,8 +12,18 @@ from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
 import astrbot.api.message_components as Comp
 
+_PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
+if _PLUGIN_DIR not in sys.path:
+    sys.path.insert(0, _PLUGIN_DIR)
 
-@register("群老婆", "xiaolongxia521", "支持分群固定配对，可设置当老婆不在群时的提示文本，凌晨4点重置，支持强娶、离婚功能，允许拥有多个群老婆。新增活跃天数配置，优化永恒老婆功能。", "3.0.0", "https://github.com/xiaolongxia521/astrbot_plugin_today_wife")
+for _mod_name in list(sys.modules.keys()):
+    if _mod_name == "relationship_graph" or _mod_name.startswith("relationship_graph."):
+        del sys.modules[_mod_name]
+
+relationship_graph = importlib.import_module("relationship_graph")
+
+
+@register("群老婆", "xiaolongxia521", "支持分群固定配对，可设置当老婆不在群时的提示文本，凌晨4点重置，支持强娶、离婚功能，允许拥有多个群老婆。新增「所有人都是我老婆」「强娶全体成员」「全部离婚」「老婆关系网」功能。", "3.2.0", "https://github.com/xiaolongxia521/astrbot_plugin_today_wife")
 class MyPlugin(Star):
     def __init__(self, context: Context, config: Optional[Dict] = None): 
         super().__init__(context)
@@ -25,6 +37,9 @@ class MyPlugin(Star):
         self.daily_marriages: Dict[str, Dict[str, List[str]]] = defaultdict(dict)
         self.fixed_pairings: Dict[str, Dict[str, Dict]] = {}
         self.locks = defaultdict(asyncio.Lock)
+        
+        # 每日次数限制追踪
+        self.daily_counts: Dict[str, Dict[str, Dict[str, int]]] = defaultdict(lambda: defaultdict(dict))
         
         self._load_fixed_pairings()
         
@@ -76,7 +91,11 @@ class MyPlugin(Star):
             "not_in_group_text": "你绑定的老婆今天不在这个群里哦~",
             "max_random_count": 5,
             "max_marry_count": 3,
-            "max_divorce_count": 2
+            "max_divorce_count": 2,
+            "max_all_marry_count": 1,
+            "max_force_all_marry_count": 1,
+            "max_all_divorce_count": 1,
+            "max_relationship_graph_count": 3
         }
 
     def _load_fixed_pairings(self):
@@ -153,7 +172,10 @@ class MyPlugin(Star):
                     if user_id not in self.daily_marriages[group_id][wife_id]:
                         self.daily_marriages[group_id][wife_id].append(user_id)
         
-        logger.info("每日发言记录已重置，固定配对已保留。")
+        # 重置每日次数限制
+        self.daily_counts.clear()
+        
+        logger.info("每日发言记录已重置，固定配对已保留，次数限制已重置。")
 
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def handle_all_messages(self, event: AstrMessageEvent):
@@ -224,6 +246,21 @@ class MyPlugin(Star):
         
         return None
 
+    async def _get_all_nicknames(self, event: AstrMessageEvent, qq_list: List[str]) -> Dict[str, str]:
+        result = {}
+        try:
+            group = await event.get_group(event.get_group_id())
+            if group and group.members:
+                member_map = {str(m.user_id): m.nickname or str(m.user_id) for m in group.members}
+                for qq in qq_list:
+                    result[qq] = member_map.get(qq, qq)
+                return result
+        except Exception as e:
+            logger.warning(f"获取群成员昵称失败: {e}")
+        for qq in qq_list:
+            result[qq] = qq
+        return result
+
     async def _get_active_candidates(self, group_id: str, user_id: str) -> List[str]:
         """获取活跃用户候选人"""
         import datetime
@@ -244,6 +281,59 @@ class MyPlugin(Star):
             candidates = [uid for uid in candidates if uid != user_id and uid not in existing_wives]
         
         return candidates
+
+    def _check_daily_limit(self, group_id: str, user_id: str, limit_type: str, max_count: int) -> bool:
+        """检查每日次数限制
+        
+        Args:
+            group_id: 群号
+            user_id: 用户ID
+            limit_type: 限制类型（如 'random', 'marry', 'divorce', 'all_marry', 'force_all_marry', 'all_divorce'）
+            max_count: 最大次数，0表示无限制
+            
+        Returns:
+            True: 未超过限制
+            False: 已超过限制
+        """
+        if max_count <= 0:
+            return True
+        
+        import datetime
+        today_str = datetime.datetime.now().strftime("%Y-%m-%d")
+        
+        # 检查是否是新的一天
+        if group_id in self.daily_counts and user_id in self.daily_counts[group_id]:
+            last_date = self.daily_counts[group_id][user_id].get("_date", "")
+            if last_date != today_str:
+                # 新的一天，重置次数
+                self.daily_counts[group_id][user_id] = {"_date": today_str}
+        
+        current_count = self.daily_counts[group_id][user_id].get(limit_type, 0)
+        if current_count >= max_count:
+            return False
+        
+        # 增加次数
+        self.daily_counts[group_id][user_id][limit_type] = current_count + 1
+        self.daily_counts[group_id][user_id]["_date"] = today_str
+        return True
+
+    def _has_at_all(self, event: AstrMessageEvent) -> bool:
+        """检查消息中是否包含@全体成员"""
+        if hasattr(event, 'message_obj') and hasattr(event.message_obj, 'chain'):
+            for component in event.message_obj.chain:
+                # QQ的@全体成员在OneBot协议中通常表现为 qq="all"
+                if hasattr(component, 'qq'):
+                    if str(component.qq) == "all":
+                        return True
+                # 有些平台可能使用其他属性
+                if hasattr(component, 'data') and 'qq' in component.data:
+                    if str(component.data['qq']) == "all":
+                        return True
+                # 检查是否是At类型且标识为全体成员
+                if component.__class__.__name__ == 'At':
+                    if hasattr(component, 'qq') and str(component.qq) == "all":
+                        return True
+        return False
 
     @filter.command("今日老婆")
     async def show_wives(self, event: AstrMessageEvent):
@@ -405,6 +495,208 @@ class MyPlugin(Star):
             logger.info(f"群 {group_id} 离婚成功: {user_id} & {target_qq}")
             yield await self.build_divorce_result(event, user_id, self.daily_marriages.get(group_id, {}).get(user_id, []))
 
+    @filter.command("所有人都是我老婆")
+    async def marry_all_active(self, event: AstrMessageEvent):
+        """将当前群所有活跃群友加入老婆列表"""
+        group_id = event.get_group_id()
+        user_id = event.get_sender_id()
+        
+        if not group_id:
+            yield event.plain_result("此功能仅限群聊使用。")
+            return
+        
+        # 检查次数限制
+        max_count = self.plugin_config.get("max_all_marry_count", 1)
+        if not self._check_daily_limit(group_id, user_id, "all_marry", max_count):
+            yield event.plain_result(f"你今天已经使用过所有人都是我老婆了，明天再来吧~ 喵~")
+            return
+        
+        async with self.locks[group_id]:
+            active_members = await self._get_active_candidates(group_id, user_id)
+            
+            if not active_members:
+                yield event.plain_result("没有活跃的群友可以配对...")
+                return
+            
+            if group_id not in self.daily_marriages:
+                self.daily_marriages[group_id] = {}
+            
+            if user_id not in self.daily_marriages[group_id]:
+                self.daily_marriages[group_id][user_id] = []
+            
+            added_count = 0
+            for member_id in active_members:
+                if member_id == user_id:
+                    continue
+                
+                if member_id not in self.daily_marriages[group_id][user_id]:
+                    self.daily_marriages[group_id][user_id].append(member_id)
+                    added_count += 1
+                
+                if member_id not in self.daily_marriages[group_id]:
+                    self.daily_marriages[group_id][member_id] = []
+                if user_id not in self.daily_marriages[group_id][member_id]:
+                    self.daily_marriages[group_id][member_id].append(user_id)
+            
+            logger.info(f"群 {group_id} 所有人都是我老婆成功: {user_id} 新增了 {added_count} 个老婆")
+            yield await self.build_all_marry_result(event, user_id, self.daily_marriages[group_id][user_id], added_count)
+
+    @filter.command("强娶全体成员")
+    async def force_marry_all(self, event: AstrMessageEvent):
+        """强娶群内所有成员（支持@全体成员）"""
+        group_id = event.get_group_id()
+        user_id = event.get_sender_id()
+        
+        if not group_id:
+            yield event.plain_result("此功能仅限群聊使用。")
+            return
+        
+        # 检查次数限制
+        max_count = self.plugin_config.get("max_force_all_marry_count", 1)
+        if not self._check_daily_limit(group_id, user_id, "force_all_marry", max_count):
+            yield event.plain_result(f"你今天已经强娶过全体成员了，明天再来吧~ 喵~")
+            return
+        
+        async with self.locks[group_id]:
+            # 获取所有群成员
+            group_members = await self._get_group_members(event, group_id)
+            
+            if not group_members:
+                yield event.plain_result("无法获取群成员列表...")
+                return
+            
+            if group_id not in self.daily_marriages:
+                self.daily_marriages[group_id] = {}
+            
+            if user_id not in self.daily_marriages[group_id]:
+                self.daily_marriages[group_id][user_id] = []
+            
+            added_count = 0
+            for member_id in group_members:
+                if member_id == user_id:
+                    continue
+                
+                # 避免重复添加已经是老婆的用户
+                if member_id in self.daily_marriages[group_id][user_id]:
+                    continue
+                
+                self.daily_marriages[group_id][user_id].append(member_id)
+                added_count += 1
+                
+                if member_id not in self.daily_marriages[group_id]:
+                    self.daily_marriages[group_id][member_id] = []
+                if user_id not in self.daily_marriages[group_id][member_id]:
+                    self.daily_marriages[group_id][member_id].append(user_id)
+            
+            logger.info(f"群 {group_id} 强娶全体成员成功: {user_id} 新增了 {added_count} 个老婆")
+            yield await self.build_force_all_marry_result(event, user_id, self.daily_marriages[group_id][user_id], added_count)
+
+    @filter.command("全部离婚")
+    async def divorce_all(self, event: AstrMessageEvent):
+        """解除与所有老婆的关系"""
+        group_id = event.get_group_id()
+        user_id = event.get_sender_id()
+        
+        if not group_id:
+            yield event.plain_result("此功能仅限群聊使用。")
+            return
+        
+        # 检查次数限制
+        max_count = self.plugin_config.get("max_all_divorce_count", 1)
+        if not self._check_daily_limit(group_id, user_id, "all_divorce", max_count):
+            yield event.plain_result(f"你今天已经全部离婚过了，明天再来吧~ 喵~")
+            return
+        
+        async with self.locks[group_id]:
+            if group_id not in self.daily_marriages or user_id not in self.daily_marriages[group_id]:
+                yield event.plain_result("你还没有群老婆，无需离婚。")
+                return
+            
+            wife_list = self.daily_marriages[group_id][user_id].copy()
+            
+            # 解除与所有老婆的关系
+            for wife_id in wife_list:
+                if wife_id in self.daily_marriages[group_id]:
+                    if user_id in self.daily_marriages[group_id][wife_id]:
+                        self.daily_marriages[group_id][wife_id].remove(user_id)
+                        if not self.daily_marriages[group_id][wife_id]:
+                            del self.daily_marriages[group_id][wife_id]
+            
+            # 删除用户的所有老婆记录
+            del self.daily_marriages[group_id][user_id]
+            
+            logger.info(f"群 {group_id} 全部离婚成功: {user_id} 解除了 {len(wife_list)} 个老婆")
+            yield event.plain_result(f"{Comp.At(qq=user_id)} 全部离婚成功！你解除了与 {len(wife_list)} 个老婆的关系~ 喵~")
+
+    @filter.command("老婆关系网")
+    async def relationship_network(self, event: AstrMessageEvent):
+        """生成并显示本群老婆关系网图"""
+        group_id = event.get_group_id()
+        user_id = event.get_sender_id()
+
+        if not group_id:
+            yield event.plain_result("此功能仅限群聊使用。")
+            return
+
+        max_count = self.plugin_config.get("max_relationship_graph_count", 3)
+        if not self._check_daily_limit(group_id, user_id, "relationship_graph", max_count):
+            yield event.plain_result("你今天生成老婆关系网的次数已用完，明天再来吧~ 喵~")
+            return
+
+        async with self.locks[group_id]:
+            if group_id not in self.daily_marriages or not self.daily_marriages[group_id]:
+                yield event.plain_result("当前群还没有任何老婆关系哦~ 喵~")
+                return
+
+            edges, _ = relationship_graph.extract_relationships(self.daily_marriages, group_id)
+            if not edges:
+                yield event.plain_result("当前群还没有任何老婆关系哦~ 喵~")
+                return
+
+        yield event.plain_result("正在生成老婆关系网，请稍等... 喵~")
+
+        try:
+            nodes: Set[str] = set()
+            for u, v in edges:
+                nodes.add(u)
+                nodes.add(v)
+
+            nickname_map = await self._get_all_nicknames(event, list(nodes))
+
+            try:
+                from pathlib import Path
+                from astrbot.core.utils.astrbot_path import get_astrbot_data_path
+                cache_dir = str(Path(get_astrbot_data_path()) / "plugin_data" / "astrbot_plugin_today_wife")
+            except Exception:
+                cache_dir = os.path.join(_PLUGIN_DIR, "data")
+
+            await relationship_graph.ensure_cjk_font(cache_dir)
+
+            output_path = os.path.join(cache_dir, f"relationship_{group_id}.png")
+
+            img_path = await relationship_graph.generate_relationship_graph(
+                daily_marriages=self.daily_marriages,
+                group_id=group_id,
+                nickname_map=nickname_map,
+                cache_dir=cache_dir,
+                output_path=output_path,
+                title="老婆关系网",
+            )
+
+            if img_path and os.path.exists(img_path):
+                chain = [
+                    Comp.At(qq=user_id),
+                    Comp.Plain(" 老婆关系网生成完毕~ 喵~\n"),
+                    Comp.Image.fromFileSystem(img_path),
+                ]
+                yield event.chain_result(chain)
+            else:
+                yield event.plain_result("关系网生成失败，请稍后再试~ 喵~")
+
+        except Exception as e:
+            logger.error(f"生成老婆关系网失败: {e}")
+            yield event.plain_result("关系网生成出错，请稍后再试~ 喵~")
+
     async def build_marriage_result(self, event, user_id, wife_list):
         """构建结果消息链"""
         chain = [Comp.At(qq=user_id), Comp.Plain(" 你的群老婆有：")]
@@ -473,6 +765,48 @@ class MyPlugin(Star):
             return event.plain_result(f"{Comp.At(qq=user_id)} 离婚成功！你现在没有群老婆了~ 喵~")
         
         chain = [Comp.At(qq=user_id), Comp.Plain(" 离婚成功！现在你的群老婆有：")]
+        
+        for index, wife_id in enumerate(wife_list):
+            if index > 0:
+                chain.append(Comp.Plain("、"))
+            
+            # 获取群昵称
+            nickname = await self._get_group_member_nickname(event, wife_id)
+            chain.append(Comp.Plain(nickname))
+        
+        if len(wife_list) <= 2:
+            for wife_id in wife_list:
+                avatar_url = f"https://q.qlogo.cn/headimg_dl?dst_uin={wife_id}&spec=640"
+                chain.append(Comp.Plain("\n"))
+                chain.append(Comp.Image.fromURL(avatar_url))
+        
+        chain.append(Comp.Plain(" 喵~"))
+        return event.chain_result(chain)
+
+    async def build_all_marry_result(self, event, user_id, wife_list, added_count):
+        """构建所有人都是我老婆结果消息链"""
+        chain = [Comp.At(qq=user_id), Comp.Plain(f" 所有人都是你老婆啦！（新增 {added_count} 个）现在你的群老婆有：")]
+        
+        for index, wife_id in enumerate(wife_list):
+            if index > 0:
+                chain.append(Comp.Plain("、"))
+            
+            # 获取群昵称
+            nickname = await self._get_group_member_nickname(event, wife_id)
+            chain.append(Comp.Plain(nickname))
+        
+        if len(wife_list) <= 2:
+            for wife_id in wife_list:
+                avatar_url = f"https://q.qlogo.cn/headimg_dl?dst_uin={wife_id}&spec=640"
+                chain.append(Comp.Plain("\n"))
+                chain.append(Comp.Image.fromURL(avatar_url))
+        
+        chain.append(Comp.Plain(" 喵~"))
+        return event.chain_result(chain)
+
+    async def build_force_all_marry_result(self, event, user_id, wife_list, added_count):
+        """构建强娶全体成员结果消息链"""
+        chain = [Comp.At(qq=user_id), Comp.Plain(f" 强娶全体成员成功！（新增 {added_count} 个）现在你的群老婆有：")]
         
         for index, wife_id in enumerate(wife_list):
             if index > 0:

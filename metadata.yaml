@@ -1,8 +1,8 @@
 name: astrbot_plugin_today_wife
 display_name: 今日老婆 (分群配对版)
-description: 支持分群固定配对，可设置当老婆不在群时的提示文本，凌晨4点重置，支持强娶、离婚功能，允许拥有多个群老婆。新增活跃天数配置，优化永恒老婆功能。
+description: 支持分群固定配对，可设置当老婆不在群时的提示文本，凌晨4点重置，支持强娶、离婚功能，允许拥有多个群老婆。新增「所有人都是我老婆」「强娶全体成员」「全部离婚」「老婆关系网」功能，支持活跃群友批量绑定、全员绑定和关系网可视化。
 author: xiaolongxia521
-version: 3.0.0
+version: 3.2.0
 repo: https://github.com/xiaolongxia521/astrbot_plugin_today_wife
 config_schema:
   items:
@@ -47,3 +47,19 @@ config_schema:
       type: int
       description: 每日离婚的次数限制
       default: 2
+    max_all_marry_count:
+      type: int
+      description: 每日所有人都是我老婆的次数限制
+      default: 1
+    max_force_all_marry_count:
+      type: int
+      description: 每日强娶全体成员的次数限制
+      default: 1
+    max_all_divorce_count:
+      type: int
+      description: 每日全部离婚的次数限制
+      default: 1
+    max_relationship_graph_count:
+      type: int
+      description: 每日生成老婆关系网的次数限制
+      default: 3

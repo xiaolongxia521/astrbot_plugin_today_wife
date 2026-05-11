@@ -1,1 +1,4 @@
 apscheduler
+networkx
+Pillow
+aiohttp

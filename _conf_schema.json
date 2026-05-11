@@ -47,5 +47,29 @@
     "type": "int",
     "hint": "填写 0 表示无限制，整数",
     "default": 2
+  },
+  "max_all_marry_count": {
+    "description": "每日所有人都是我老婆的次数限制",
+    "type": "int",
+    "hint": "填写 0 表示无限制，整数",
+    "default": 1
+  },
+  "max_force_all_marry_count": {
+    "description": "每日强娶全体成员的次数限制",
+    "type": "int",
+    "hint": "填写 0 表示无限制，整数",
+    "default": 1
+  },
+  "max_all_divorce_count": {
+    "description": "每日全部离婚的次数限制",
+    "type": "int",
+    "hint": "填写 0 表示无限制，整数",
+    "default": 1
+  },
+  "max_relationship_graph_count": {
+    "description": "每日生成老婆关系网的次数限制",
+    "type": "int",
+    "hint": "填写 0 表示无限制，整数",
+    "default": 3
   }
 }
